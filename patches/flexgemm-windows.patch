@@ -1,0 +1,42 @@
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -19,6 +19,7 @@
+ ]
+ dependencies = [
+     "torch>=2.4.0",
+-    "triton>=3.2.0",
++    "triton>=3.2.0; sys_platform != 'win32'",
++    "triton-windows>=3.5.1.post24,<3.6; sys_platform == 'win32'",
+     "filelock",
+ ]
+--- a/setup.py
++++ b/setup.py
+@@ -50,8 +50,10 @@
+                 "flex_gemm/kernels/cuda/ext.cpp",
+             ],
+             extra_compile_args={
+-                "cxx": ["-O3", "-std=c++17"],
+-                "nvcc": ["-O3","-std=c++17"] + cc_flag,
++                "cxx": (["/O2", "/std:c++17", "/Zc:preprocessor", "/DUSE_CUDA"]
++                        if os.name == "nt" else ["-O3", "-std=c++17"]),
++                "nvcc": (["-O3", "-std=c++17", "-DUSE_CUDA", "-Xcompiler=/Zc:preprocessor"]
++                         if os.name == "nt" else ["-O3", "-std=c++17"]) + cc_flag,
+             }
+         )
+     ],
+--- a/flex_gemm/kernels/cuda/spconv/neighbor_map.cu
++++ b/flex_gemm/kernels/cuda/spconv/neighbor_map.cu
+@@ -211,10 +211,9 @@
+     while (idx < total_len) {
+         int v = idx / len_n;
+         int n = idx % len_n;
+-        uint tmp = neigh_map[n * V + v];
+-        *(uint*)&neigh_map_T[v * N + n + n_base] = tmp;
+-        tmp = tmp != std::numeric_limits<uint32_t>::max();
+-        *(uint*)&neigh_mask_T[v * N + n + n_base] = tmp;
++        uint32_t tmp = neigh_map[n * V + v];
++        neigh_map_T[v * N + n + n_base] = tmp;
++        neigh_mask_T[v * N + n + n_base] = tmp != std::numeric_limits<uint32_t>::max();
+         idx += BLOCK_SIZE;
+     }
+ 
