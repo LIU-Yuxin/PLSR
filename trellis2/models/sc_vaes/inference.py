@@ -6,10 +6,9 @@ from torch.nn import functional as F
 
 
 def create_slat_vae(config):
-    """Construct reference layers without resolving the research model registry.
+    """Construct the VAE architecture selected by the model configuration.
 
-    Keep construction, strict checkpoint loading and wrapping separate so the
-    caller retains its original dtype-conversion order and CPU offload policy.
+    The caller loads weights before wrapping these layers for execution.
     """
     from .sparse_unet_vae import SparseUnetVaeEncoder, SparseUnetVaeDecoder
 
@@ -69,7 +68,6 @@ class SLatVaeDecoder(nn.Module):
     """Reference full decoder, returning voxel attributes and subdivision guides.
 
     Mesh construction and any outer spatial partitioning belong to the codec.
-    No implicit coordinate-dependent patching, training or feature-probe branch.
     """
 
     def __init__(self, decoder):

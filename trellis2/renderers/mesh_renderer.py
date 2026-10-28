@@ -306,6 +306,10 @@ class MeshRenderer:
                         elif isinstance(mesh, MeshWithPbrMaterial):
                             tri_id = rast[0, :, :, -1:]
                             mask = tri_id > 0
+                            # UPSTREAM_REVIEW_NOTE (TRELLIS.2 75fbf018):
+                            # Automated code review flagged a possible inherited bug:
+                            # chunk-local triangle IDs index global UVs/materials
+                            # without the face offset. Upstream behavior is preserved.
                             uv_coords = mesh.uv_coords.reshape(1, -1, 2)
                             texc, texd = dr.interpolate(
                                 uv_coords,

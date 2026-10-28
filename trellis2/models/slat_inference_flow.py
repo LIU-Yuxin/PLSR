@@ -1,8 +1,4 @@
-"""Original TRELLIS.2 SLat model used only for internal coarse generation.
-
-The model body is retained from the user's trellis2_official reference. Keeping
-it independent of structured_latent_flow avoids importing the research SR models.
-"""
+"""TRELLIS.2 SLat model for coarse generation with the original model weights."""
 
 from typing import List, Literal, Optional, Tuple, Union
 from functools import partial

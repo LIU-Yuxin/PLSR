@@ -1,4 +1,4 @@
-"""Sparse input support for PEFT's LoRA branches, without patching PyTorch."""
+"""SparseTensor input support for PEFT LoRA layers."""
 
 import torch
 import torch.nn as nn

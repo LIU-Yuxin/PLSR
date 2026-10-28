@@ -104,9 +104,6 @@ class DfsOctree:
         self.inverse_opacity_activation = lambda x: torch.log(x / (1 - x)) + 6
         self.color_activation = lambda x: torch.sigmoid(x)
 
-    @property
-    def num_non_leaf_nodes(self):
-        return self.structure.shape[0]
     
     @property
     def num_leaf_nodes(self):
@@ -134,6 +131,10 @@ class DfsOctree:
             return torch.full((self.position.shape[0], 1), torch.finfo(torch.float32).max, dtype=torch.float32, device=self.device)
         return self.density_activation(self.density)
     
+    # UPSTREAM_REVIEW_NOTE (Microsoft TRELLIS):
+    # Automated code review flagged a possible inherited bug: Gaussian
+    # opacity reads density although Gaussian primitives store opacity.
+    # Upstream behavior is preserved; see trellis/representations/octree/octree_dfs.py.
     @property
     def get_opacity(self):
         return self.opacity_activation(self.density)
@@ -146,9 +147,6 @@ class DfsOctree:
     def get_decoupoly(self):
         return F.normalize(self.decoupoly_V, dim=-1), self.decoupoly_g
 
-    @property
-    def get_color(self):
-        return self.color_activation(self.colors)
 
     @property
     def get_features(self):
@@ -181,167 +179,3 @@ class DfsOctree:
             except Exception as e:
                 print(e)
                 raise ValueError(f"Error loading key {key}.")
-
-    def gather_from_leaf_children(self, data):
-        """
-        Gather the data from the leaf children.
-
-        Args:
-            data (torch.Tensor): the data to gather. The first dimension should be the number of leaf nodes.
-        """
-        leaf_cnt = self.structure[:, 0]
-        leaf_cnt_masks = [leaf_cnt == i for i in range(1, 9)]
-        ret = torch.zeros((self.num_non_leaf_nodes,), dtype=data.dtype, device=self.device)
-        for i in range(8):
-            if leaf_cnt_masks[i].sum() == 0:
-                continue
-            start = self.structure[leaf_cnt_masks[i], 2]
-            for j in range(i+1):
-                ret[leaf_cnt_masks[i]] += data[start + j]
-        return ret
-
-    def gather_from_non_leaf_children(self, data):
-        """
-        Gather the data from the non-leaf children.
-
-        Args:
-            data (torch.Tensor): the data to gather. The first dimension should be the number of leaf nodes.
-        """
-        non_leaf_cnt = 8 - self.structure[:, 0]
-        non_leaf_cnt_masks = [non_leaf_cnt == i for i in range(1, 9)]
-        ret = torch.zeros_like(data, device=self.device)
-        for i in range(8):
-            if non_leaf_cnt_masks[i].sum() == 0:
-                continue
-            start = self.structure[non_leaf_cnt_masks[i], 1]
-            for j in range(i+1):
-                ret[non_leaf_cnt_masks[i]] += data[start + j]
-        return ret
-
-    def structure_control(self, mask):
-        """
-        Control the structure of the octree.
-
-        Args:
-            mask (torch.Tensor): the mask to control the structure. 1 for subdivide, -1 for merge, 0 for keep.
-        """
-        # Dont subdivide when the depth is the maximum.
-        mask[self.depth.squeeze() == self.max_depth] = torch.clamp_max(mask[self.depth.squeeze() == self.max_depth], 0)
-        # Dont merge when the depth is the minimum.
-        mask[self.depth.squeeze() == 1] = torch.clamp_min(mask[self.depth.squeeze() == 1], 0)
-
-        # Gather control mask
-        structre_ctrl = self.gather_from_leaf_children(mask)
-        structre_ctrl[structre_ctrl==-8] = -1
-
-        new_leaf_num = self.structure[:, 0].clone()
-        # Modify the leaf num.
-        structre_valid = structre_ctrl >= 0
-        new_leaf_num[structre_valid] -= structre_ctrl[structre_valid]                               # Add the new nodes.
-        structre_delete = structre_ctrl < 0
-        merged_nodes = self.gather_from_non_leaf_children(structre_delete.int())
-        new_leaf_num += merged_nodes                                                                # Delete the merged nodes.
-
-        # Update the structure array to allocate new nodes.
-        mem_offset = torch.zeros((self.num_non_leaf_nodes + 1,), dtype=torch.int32, device=self.device)
-        mem_offset.index_add_(0, self.structure[structre_valid, 1], structre_ctrl[structre_valid])  # Add the new nodes.
-        mem_offset[:-1] -= structre_delete.int()                                                    # Delete the merged nodes.
-        new_structre_idx = torch.arange(0, self.num_non_leaf_nodes + 1, dtype=torch.int32, device=self.device) + mem_offset.cumsum(0)
-        new_structure_length = new_structre_idx[-1].item()
-        new_structre_idx = new_structre_idx[:-1]
-        new_structure = torch.empty((new_structure_length, 3), dtype=torch.int32, device=self.device)
-        new_structure[new_structre_idx[structre_valid], 0] = new_leaf_num[structre_valid]
-
-        # Initialize the new nodes.
-        new_node_mask = torch.ones((new_structure_length,), dtype=torch.bool, device=self.device)
-        new_node_mask[new_structre_idx[structre_valid]] = False
-        new_structure[new_node_mask, 0] = 8                                                         # Initialize to all leaf nodes.
-        new_node_num = new_node_mask.sum().item()
-
-        # Rebuild child ptr.
-        non_leaf_cnt = 8 - new_structure[:, 0]
-        new_child_ptr = torch.cat([torch.zeros((1,), dtype=torch.int32, device=self.device), non_leaf_cnt.cumsum(0)[:-1]])
-        new_structure[:, 1] = new_child_ptr + 1
-
-        # Rebuild data ptr with old data.
-        leaf_cnt = torch.zeros((new_structure_length,), dtype=torch.int32, device=self.device)
-        leaf_cnt.index_add_(0, new_structre_idx, self.structure[:, 0])
-        old_data_ptr = torch.cat([torch.zeros((1,), dtype=torch.int32, device=self.device), leaf_cnt.cumsum(0)[:-1]])
-
-        # Update the data array
-        subdivide_mask = mask == 1
-        merge_mask = mask == -1
-        data_valid = ~(subdivide_mask | merge_mask)
-        mem_offset = torch.zeros((self.num_leaf_nodes + 1,), dtype=torch.int32, device=self.device)
-        mem_offset.index_add_(0, old_data_ptr[new_node_mask], torch.full((new_node_num,), 8, dtype=torch.int32, device=self.device))    # Add data array for new nodes
-        mem_offset[:-1] -= subdivide_mask.int()                                                                                         # Delete data elements for subdivide nodes
-        mem_offset[:-1] -= merge_mask.int()                                                                                             # Delete data elements for merge nodes
-        mem_offset.index_add_(0, self.structure[structre_valid, 2], merged_nodes[structre_valid])                                       # Add data elements for merge nodes
-        new_data_idx = torch.arange(0, self.num_leaf_nodes + 1, dtype=torch.int32, device=self.device) + mem_offset.cumsum(0)
-        new_data_length = new_data_idx[-1].item()
-        new_data_idx = new_data_idx[:-1]
-        new_data = {data: torch.empty((new_data_length,) + getattr(self, data).shape[1:], dtype=getattr(self, data).dtype, device=self.device) for data in self.data}
-        for data in self.data:
-            new_data[data][new_data_idx[data_valid]] = getattr(self, data)[data_valid]
-
-        # Rebuild data ptr
-        leaf_cnt = new_structure[:, 0]
-        new_data_ptr = torch.cat([torch.zeros((1,), dtype=torch.int32, device=self.device), leaf_cnt.cumsum(0)[:-1]])
-        new_structure[:, 2] = new_data_ptr
-
-        # Initialize the new data array
-        ## For subdivide nodes
-        if subdivide_mask.sum() > 0:
-            subdivide_data_ptr = new_structure[new_node_mask, 2]
-            for data in self.data:
-                for i in range(8):
-                    if data == 'position':
-                        offset = torch.tensor([i // 4, (i // 2) % 2, i % 2], dtype=torch.float32, device=self.device) - 0.5
-                        scale = 2 ** (-1.0 - self.depth[subdivide_mask])
-                        new_data['position'][subdivide_data_ptr + i] = self.position[subdivide_mask] + offset * scale
-                    elif data == 'depth':
-                        new_data['depth'][subdivide_data_ptr + i] = self.depth[subdivide_mask] + 1
-                    elif data == 'opacity':
-                        new_data['opacity'][subdivide_data_ptr + i] = self.inverse_opacity_activation(torch.sqrt(self.opacity_activation(self.opacity[subdivide_mask])))
-                    elif data == 'trivec':
-                        offset = torch.tensor([i // 4, (i // 2) % 2, i % 2], dtype=torch.float32, device=self.device) * 0.5
-                        coord = (torch.linspace(0, 0.5, self.trivec.shape[-1], dtype=torch.float32, device=self.device)[None] + offset[:, None]).reshape(1, 3, self.trivec.shape[-1], 1)
-                        axis = torch.linspace(0, 1, 3, dtype=torch.float32, device=self.device).reshape(1, 3, 1, 1).repeat(1, 1, self.trivec.shape[-1], 1)
-                        coord = torch.stack([coord, axis], dim=3).reshape(1, 3, self.trivec.shape[-1], 2).expand(self.trivec[subdivide_mask].shape[0], -1, -1, -1) * 2 - 1
-                        new_data['trivec'][subdivide_data_ptr + i] = F.grid_sample(self.trivec[subdivide_mask], coord, align_corners=True)
-                    else:
-                        new_data[data][subdivide_data_ptr + i] = getattr(self, data)[subdivide_mask]
-        ## For merge nodes
-        if merge_mask.sum() > 0:
-            merge_data_ptr = torch.empty((merged_nodes.sum().item(),), dtype=torch.int32, device=self.device)
-            merge_nodes_cumsum = torch.cat([torch.zeros((1,), dtype=torch.int32, device=self.device), merged_nodes.cumsum(0)[:-1]])
-            for i in range(8):
-                merge_data_ptr[merge_nodes_cumsum[merged_nodes > i] + i] = new_structure[new_structre_idx[merged_nodes > i], 2] + i
-            old_merge_data_ptr = self.structure[structre_delete, 2]
-            for data in self.data:
-                if data == 'position':
-                    scale = 2 ** (1.0 - self.depth[old_merge_data_ptr])
-                    new_data['position'][merge_data_ptr] = ((self.position[old_merge_data_ptr] + 0.5) / scale).floor() * scale + 0.5 * scale - 0.5
-                elif data == 'depth':
-                    new_data['depth'][merge_data_ptr] = self.depth[old_merge_data_ptr] - 1
-                elif data == 'opacity':
-                    new_data['opacity'][subdivide_data_ptr + i] = self.inverse_opacity_activation(self.opacity_activation(self.opacity[subdivide_mask])**2)
-                elif data == 'trivec':
-                    new_data['trivec'][merge_data_ptr] = self.trivec[old_merge_data_ptr]
-                else:
-                    new_data[data][merge_data_ptr] = getattr(self, data)[old_merge_data_ptr]
-
-        # Update the structure and data array
-        self.structure = new_structure
-        for data in self.data:
-            setattr(self, data, new_data[data])
-
-        # Save data array control temp variables
-        self.data_rearrange_buffer = {
-            'subdivide_mask': subdivide_mask,
-            'merge_mask': merge_mask,
-            'data_valid': data_valid,
-            'new_data_idx': new_data_idx,
-            'new_data_length': new_data_length,
-            'new_data': new_data
-        } 

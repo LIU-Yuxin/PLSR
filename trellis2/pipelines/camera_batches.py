@@ -29,6 +29,25 @@ def _offload_multiview_features(module, args, output):
     return _move_camera_tensors(output, "cpu")
 
 
+class _OffloadedFeatureNorm(nn.Module):
+    """Stage normalized prediction features as soon as they are produced.
+
+    UniCeption's alternating transformer uses its final norm for saved
+    intermediate snapshots and final outputs, never for the running residual.
+    Returning these snapshots on CPU releases their GPU storage before later
+    global-attention blocks, while the active token context stays unchanged.
+    """
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, features):
+        if torch.is_grad_enabled() or self.training:
+            raise RuntimeError("Camera feature offload is inference-only")
+        return self.module(features).to("cpu")
+
+
 def _concatenate_camera_outputs(outputs, device):
     # The upstream downstream_head concatenates these same adaptor fields.
     # Keep completed batches on CPU until the complete output is needed.
@@ -159,10 +178,55 @@ class _TokenBatchedMlp(nn.Module):
         return output.reshape(*x.shape[:-1], output.shape[-1])
 
 
+def _encode_geometry_view_batches(encoder, encoder_input):
+    """Bound independent ray/depth convolutions without changing view fusion."""
+    from uniception.models.encoders.base import ViTEncoderNonImageInput
+
+    if torch.is_grad_enabled() or encoder.training:
+        raise RuntimeError("Camera geometric encoder batching is inference-only")
+    if not isinstance(encoder_input, ViTEncoderNonImageInput):
+        raise TypeError("Camera geometric encoders require ViTEncoderNonImageInput")
+    data = encoder_input.data
+    size = encoder._plsr_geometry_view_batch_size
+    output = None
+    for start in range(0, len(data), size):
+        stop = min(start + size, len(data))
+        part = encoder._plsr_original_geometry_forward(replace(encoder_input, data=data[start:stop]))
+        if part.registers is not None:
+            raise ValueError("Dense geometric encoder unexpectedly returned register tokens")
+        if output is None:
+            output = replace(part, features=part.features.new_empty((len(data), *part.features.shape[1:])))
+        output.features[start:stop].copy_(part.features)
+        del part
+    print(f"Encoded camera {encoder._plsr_geometry_label}: {len(data)} views in batches of {size}", flush=True)
+    return output
+
+
+def _configure_geometry_batches(model, view_batch_size):
+    """Preserve module types, attributes and state-dict names when batching."""
+    from uniception.models.encoders.dense_rep_encoder import DenseRepresentationEncoder
+
+    for name in ("ray_dirs_encoder", "depth_encoder"):
+        encoder = getattr(model, name, None)
+        if encoder is None:
+            continue
+        if view_batch_size is not None:
+            if not isinstance(encoder, DenseRepresentationEncoder):
+                raise ValueError(f"Unsupported camera geometric encoder: {type(encoder).__name__}")
+            if not hasattr(encoder, "_plsr_original_geometry_forward"):
+                encoder._plsr_original_geometry_forward = encoder.forward
+            encoder._plsr_geometry_view_batch_size = view_batch_size
+            encoder._plsr_geometry_label = name
+            encoder.forward = MethodType(_encode_geometry_view_batches, encoder)
+        elif hasattr(encoder, "_plsr_original_geometry_forward"):
+            encoder.forward = encoder._plsr_original_geometry_forward
+
+
 def configure_mapanything_batches(model, view_batch_size=None, token_batch_size=None, offload_encoder=False,
                                   offload_features=False):
     """Wrap only known independent operations after checkpoint loading."""
     from uniception.models.utils.transformer_blocks import Mlp, SwiGLUFFN
+    from uniception.models.info_sharing.alternating_attention_transformer import MultiViewAlternatingAttentionTransformerIFR
 
     for size in (view_batch_size, token_batch_size):
         if size is not None and (type(size) is not int or size <= 0):
@@ -197,10 +261,17 @@ def configure_mapanything_batches(model, view_batch_size=None, token_batch_size=
     if hasattr(model, "_plsr_feature_offload_hook"):
         model._plsr_feature_offload_hook.remove()
         del model._plsr_feature_offload_hook
+    feature_norm = model.info_sharing.norm
+    if isinstance(feature_norm, _OffloadedFeatureNorm):
+        feature_norm = feature_norm.module
+    model.info_sharing.norm = feature_norm
     if offload_features:
         if not hasattr(model, "_plsr_original_downstream_head"):
             model._plsr_original_downstream_head = model.downstream_head
         model.downstream_head = MethodType(_offloaded_downstream_head, model)
+        if (isinstance(model.info_sharing, MultiViewAlternatingAttentionTransformerIFR)
+                and model.info_sharing.norm_intermediate):
+            model.info_sharing.norm = _OffloadedFeatureNorm(feature_norm).eval()
         model._plsr_feature_offload_hook = model.info_sharing.register_forward_hook(_offload_multiview_features)
     elif hasattr(model, "_plsr_original_downstream_head"):
         model.downstream_head = model._plsr_original_downstream_head
@@ -212,6 +283,7 @@ def configure_mapanything_batches(model, view_batch_size=None, token_batch_size=
         model._encode_n_views = MethodType(_encode_view_batches, model)
     elif hasattr(model, "_plsr_original_encode_n_views"):
         model._encode_n_views = model._plsr_original_encode_n_views
+    _configure_geometry_batches(model, view_batch_size)
     blocks = model.info_sharing.self_attention_blocks
     for index in range(len(blocks)):
         block = blocks[index]

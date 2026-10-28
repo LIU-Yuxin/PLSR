@@ -1,5 +1,6 @@
 """Missing-camera estimation with rendered PBR anchors and MapAnything."""
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -111,6 +112,7 @@ class MapAnythingCameraEstimator:
 
     def _render_anchors(self, scene, anchors):
         """Render 518-pixel PBR anchors with SSAA and bundled forest lighting."""
+        os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
         import cv2
         from torchvision.transforms.functional import to_pil_image
         from ..renderers import EnvMap
@@ -198,6 +200,32 @@ class MapAnythingCameraEstimator:
                     torch.clear_autocast_cache()
                     torch.cuda.empty_cache()
 
+    def _align_centers(self, predicted, target):
+        """Retry a failed large-subset fit only when a broad consensus remains."""
+        count = len(target)
+        threshold = .05 * self.anchor_radius
+        try:
+            result = align_camera_centers(
+                predicted, target, sample_size=count // 2, threshold=threshold,
+            )
+            return (*result, False)
+        except RuntimeError as original_error:
+            sample_size = min(8, count // 2)
+            print(f"Retrying camera alignment with {sample_size}-anchor subsets", flush=True)
+            result = align_camera_centers(
+                predicted, target, sample_size=sample_size, threshold=threshold,
+            )
+            # Require at least twice the sampled points and a quarter of all anchors.
+            minimum = max(2 * sample_size, (count + 3) // 4)
+            consistent = int(np.count_nonzero(result[1] & (result[2] < threshold)))
+            if consistent < minimum:
+                raise RuntimeError(
+                    f"Camera alignment fallback has too few consistent anchors "
+                    f"({consistent}/{count}; need {minimum})"
+                ) from original_error
+            print(f"Camera alignment fallback retained {consistent}/{count} anchors", flush=True)
+            return (*result, True)
+
     @torch.no_grad()
     def __call__(self, scene, images, intrinsics, extrinsics):
         """Fill only absent fields; known cameras remain model conditions.
@@ -229,8 +257,8 @@ class MapAnythingCameraEstimator:
             )
             true_centers = torch.stack([torch.linalg.inv(ext)[:3, 3] for ext, _ in anchors]).double().cpu().numpy()
             predicted_centers = torch.linalg.inv(predicted_ext[count:])[:, :3, 3].double().numpy()
-            similarity, inliers, residuals = align_camera_centers(
-                predicted_centers, true_centers, sample_size=len(anchors) // 2, threshold=.05 * self.anchor_radius,
+            similarity, inliers, residuals, fallback_used = self._align_centers(
+                predicted_centers, true_centers,
             )
             aligned = align_extrinsics(predicted_ext, torch.from_numpy(similarity).float())
             result_ext = [known if known is not None else aligned[i].numpy().copy() for i, known in enumerate(known_extrinsics)]
@@ -246,5 +274,6 @@ class MapAnythingCameraEstimator:
             result_intr = [known if known is not None else predicted_intr[i].numpy().copy() for i, known in enumerate(known_intrinsics)]
             previous = [torch.from_numpy(ext).float() for ext in result_ext]
             self.last_report.append({"anchors": len(anchors), "inliers": int(inliers.sum()),
+                                     "alignment_fallback": fallback_used,
                                      "anchor_rms": float(np.sqrt(np.mean(residuals[inliers]**2)))})
         return result_intr, result_ext

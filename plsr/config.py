@@ -125,6 +125,8 @@ class RefinementConfig:
     seed: int = 42
     decode_intermediate: bool = False
     output_space: Literal["input", "canonical"] = "input"
+    min_view_iou: float = 0.6
+    independent_camera_estimation: bool = False
 
     def __post_init__(self):
         sequence = self.resolution_sequence
@@ -150,6 +152,12 @@ class RefinementConfig:
             raise ValueError("decode_intermediate must be a boolean.")
         if self.output_space not in ("input", "canonical"):
             raise ValueError("output_space must be 'input' or 'canonical'.")
+        if type(self.independent_camera_estimation) is not bool:
+            raise ValueError("independent_camera_estimation must be a boolean.")
+        min_iou = _finite_number(self.min_view_iou, "min_view_iou")
+        if not 0 <= min_iou <= 1:
+            raise ValueError("min_view_iou must be in [0, 1].")
+        object.__setattr__(self, "min_view_iou", min_iou)
         object.__setattr__(self, "images", tuple(self.images))
         object.__setattr__(self, "resolution_sequence", tuple(sequence))
         object.__setattr__(self, "output_dir", Path(self.output_dir))

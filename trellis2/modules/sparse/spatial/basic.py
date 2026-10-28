@@ -98,7 +98,6 @@ class SparseUpsample(nn.Module):
                 idx = torch.repeat_interleave(torch.arange(x.coords.shape[0], device=x.device), N_leaf, dim=0, output_size=subidx.shape[0])
         else:
             new_coords, idx = cache
-            print("Sparse spatial basic upsample using cache", new_coords.shape, idx.shape)
             
         new_feats = x.feats[idx]
         out = SparseTensor(new_feats, new_coords, x._shape)

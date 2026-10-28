@@ -169,6 +169,10 @@ class SparseResBlockUpsample3d(nn.Module):
         else:
             return h
     
+    # UPSTREAM_REVIEW_NOTE (TRELLIS.2 75fbf018):
+    # Automated code review flagged a possible inherited bug: forward does not
+    # accept the subdivision guide used by decoders with pred_subdiv=False.
+    # Upstream behavior is preserved.
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
         if self.use_checkpoint:
             return torch.utils.checkpoint.checkpoint(self._forward, x, use_reentrant=False)
@@ -349,6 +353,10 @@ class SparseUnetVaeEncoder(nn.Module):
         """
         return next(self.parameters()).device
 
+    # UPSTREAM_REVIEW_NOTE (TRELLIS.2 75fbf018):
+    # Automated code review flagged a possible inherited bug: the FP16/FP32
+    # conversion methods change weights without updating self.dtype.
+    # Upstream behavior is preserved.
     def convert_to_fp16(self) -> None:
         """
         Convert the torso of the model to float16.
@@ -454,6 +462,10 @@ class SparseUnetVaeDecoder(nn.Module):
         """
         return next(self.parameters()).device
 
+    # UPSTREAM_REVIEW_NOTE (TRELLIS.2 75fbf018):
+    # Automated code review flagged a possible inherited bug: the FP16/FP32
+    # conversion methods change weights without updating self.dtype.
+    # Upstream behavior is preserved.
     def convert_to_fp16(self) -> None:
         """
         Convert the torso of the model to float16.

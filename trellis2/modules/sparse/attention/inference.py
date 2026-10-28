@@ -1,4 +1,4 @@
-"""Full sparse attention with the upstream parameter layout and no probe API."""
+"""Full sparse attention with the upstream parameter layout."""
 
 import torch
 

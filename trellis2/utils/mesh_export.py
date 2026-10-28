@@ -10,6 +10,7 @@ import trimesh
 from plsr.geometry import restore_glb_coordinates
 from ..pipelines.slat_codec import AABB
 from .slat_decode import DecodedPart
+from .texture_budget import plan_texture_budget, validate_texture_budget
 
 
 def _bake_mesh(data, *, target, texture_size, verbose):
@@ -75,7 +76,7 @@ def _bake_part(part, *, target, texture_size, verbose, index, worker=_bake_mesh,
             raise
 
 
-def bake_coarse_mesh(mesh, *, index=0, verbose=False, on_event=None):
+def bake_coarse_mesh(mesh, *, texture_size=4096, index=0, verbose=False, on_event=None):
     """Bake a coarse mesh in the GLB (x,z,-y) frame.
 
     The mesh input path later applies +90 degrees about X before canonicalizing.
@@ -83,29 +84,41 @@ def bake_coarse_mesh(mesh, *, index=0, verbose=False, on_event=None):
     """
     if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
         raise ValueError("The decoded coarse mesh is empty")
-    return _bake_part(mesh.cpu(), target=1000000, texture_size=4096,
+    return _bake_part(mesh.cpu(), target=1000000, texture_size=texture_size,
                       verbose=verbose, index=f"coarse_{index}", worker=_bake_coarse_mesh,
                       **({"on_event": on_event} if on_event is not None else {}))
 
 
-def assemble_parts(parts, *, canonical_to_input=None, texture_size=4096, decimation_target=500000, verbose=False, on_event=None):
+def assemble_parts(parts, *, canonical_to_input=None, texture_size=4096, texture_budget=None,
+                   part_weights=None, decimation_target=500000, verbose=False, on_event=None):
     """Bake each local part, restore its placement and assemble a scene.
 
     Undo the baker's (x,z,-y) axes, then apply local-to-canonical and optional
     canonical-to-input transforms, in that order. Parts remain separate scene
     meshes, retaining their overlapping surfaces.
     The per-part face target is min(decimation_target, max(1, faces//5));
-    decimation_target=None uses the input face count. Each part uses a 4096-pixel
-    texture unless texture_size is supplied; None also selects that default.
+    decimation_target=None uses the input face count. texture_size caps each
+    map; texture_budget bounds total pixels per PBR image type across parts.
+    Supply planned part_weights to allocate before consuming a streaming decode.
+    Zero/None budget restores fixed texture_size maps on every part.
+    Texture budgeting is opt-in; fixed-size maps remain the default.
     """
     if texture_size is None:
         texture_size = 4096
-    if type(texture_size) is not int or texture_size <= 0:
-        raise ValueError("texture_size must be a positive integer or None for 4096")
+    validate_texture_budget(texture_size, texture_budget)
     if decimation_target is not None and (type(decimation_target) is not int or decimation_target <= 0):
         raise ValueError("decimation_target must be a positive integer or None")
+    if part_weights is None and texture_budget:
+        raise ValueError("Bounded streaming export requires planned part_weights")
+    plan = None if part_weights is None else plan_texture_budget(
+        part_weights, texture_size=texture_size, texture_budget=texture_budget)
+    if plan is not None:
+        plan.log(on_event)
     scene = trimesh.Scene()
     for index, part in enumerate(parts):
+        if plan is not None and index >= len(plan.sizes):
+            raise ValueError("Texture plan and decoded part count differ")
+        part_texture_size = texture_size if plan is None else plan.sizes[index]
         transform = canonical_to_input
         if isinstance(part, DecodedPart):
             transform = part.local_to_canonical if transform is None else transform @ part.local_to_canonical
@@ -117,8 +130,8 @@ def assemble_parts(parts, *, canonical_to_input=None, texture_size=4096, decimat
         target = len(part.faces) if decimation_target is None else min(decimation_target, max(1, len(part.faces) // 5))
         if on_event is not None:
             on_event("part_bake_start", part=index, vertices=len(part.vertices), faces=len(part.faces),
-                     material_voxels=len(part.coords), target_faces=target, texture_size=texture_size)
-        textured = _bake_part(part, target=target, texture_size=texture_size, verbose=verbose, index=index,
+                     material_voxels=len(part.coords), target_faces=target, texture_size=part_texture_size)
+        textured = _bake_part(part, target=target, texture_size=part_texture_size, verbose=verbose, index=index,
                               **({"on_event": on_event} if on_event is not None else {}))
         # Geometry and material voxels share the local unit cube while baking.
         # Apply placement afterwards; postprocessing thresholds use local units.
@@ -128,6 +141,8 @@ def assemble_parts(parts, *, canonical_to_input=None, texture_size=4096, decimat
             on_event("part_merged", part=index, scene_parts=len(scene.geometry))
     if not scene.geometry:
         raise ValueError("At least one decoded mesh part is required")
+    if plan is not None and len(scene.geometry) != len(plan.sizes):
+        raise ValueError("Texture plan and decoded part count differ")
     if on_event is not None:
         on_event("merge_complete", scene_parts=len(scene.geometry))
     return scene

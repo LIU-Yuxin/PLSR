@@ -175,15 +175,17 @@ def plan_decode_patches(latent, *, local_resolution=1024, patch_size=64, overlap
     return patches
 
 
-def plan_coarse_decode_patches(latent):
+def plan_coarse_decode_patches(latent, *, cell_limit=25000):
     """Plan coarse parts on the global 64-cell grid at mesh resolution 1024.
 
-    Use 48-cell boxes, four-cell padding/alignment/overlap, a 25,000-cell cap
+    Use 48-cell boxes, four-cell padding/alignment/overlap, the requested cell cap
     and recenter boxes below 200 cells. Keep global coordinates and consume
     every selected part. Unlike local SR decoding, no placement offset is needed.
     """
     validate_slat(latent, "coarse decode latent")
-    patch_size, overlap, cell_limit = 48, 4, 25000
+    if type(cell_limit) is not int or cell_limit <= 0:
+        raise ValueError("cell_limit must be a positive integer")
+    patch_size, overlap = 48, 4
     coords = latent.coords[:, 1:]
     if latent.shape[0] != 1 or not ((coords >= 0) & (coords < 64)).all():
         raise ValueError("Original 1024 coarse decoding requires one asset on the 64-grid")
@@ -212,7 +214,10 @@ def plan_coarse_decode_patches(latent):
         if not mask.any():
             continue
         covered |= mask
-        patches.append(DecodePatch(mask.nonzero(as_tuple=True)[0], (0, 0, 0)))
+        indices = mask.nonzero(as_tuple=True)[0]
+        if len(indices) > cell_limit:
+            raise ValueError("Coarse decode planning exceeded cell_limit")
+        patches.append(DecodePatch(indices, (0, 0, 0)))
     if not covered.all():
         raise ValueError("Coarse decode partition did not cover every input cell")
     return patches

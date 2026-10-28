@@ -38,7 +38,7 @@ def _inference_logs_to_stderr():
 
 
 def _request_config(args):
-    """User paths come from CLI arguments or an optional experiment request."""
+    """Build an inference request from CLI arguments or a JSON file."""
     base_dir = Path.cwd()
     data = {}
     if args.config is not None:
@@ -54,8 +54,8 @@ def _request_config(args):
         if value is not None:
             data[name] = str(value.expanduser().resolve())
     if not data.get("images") or "output_dir" not in data:
-        raise ValueError("Supply --image and --output-dir, or provide them in an experiment request JSON")
-    for name in ("resolution_sequence", "seed", "decode_intermediate", "output_space"):
+        raise ValueError("Supply --image and --output-dir, or provide them in a request JSON")
+    for name in ("resolution_sequence", "seed", "decode_intermediate", "output_space", "min_view_iou", "independent_camera_estimation"):
         value = getattr(args, name)
         if value is not None:
             data[name] = value
@@ -77,7 +77,7 @@ def main(argv=None):
     validate = commands.add_parser("validate", help="Validate inputs without loading models or creating output files")
     infer = commands.add_parser("infer", help="Run PLSR using public model repos or environment overrides")
     for command in (validate, infer):
-        command.add_argument("config", nargs="?", type=Path, help="Optional experiment request JSON; paths are relative to this file")
+        command.add_argument("config", nargs="?", type=Path, help="Optional request JSON; paths are relative to this file")
         command.add_argument("--image", dest="images", type=Path, action="append", help="Reference image; repeat for multiple views with a supplied mesh")
         command.add_argument("--mesh", type=Path, help="Coarse mesh; omit to generate it from one image")
         command.add_argument("--output-dir", type=Path, help="Explicit output directory")
@@ -88,9 +88,12 @@ def main(argv=None):
         command.add_argument("--seed", type=int, help="Override the repo's default seed")
         command.add_argument("--decode-intermediate", action="store_true", default=None, help="Also export intermediate meshes")
         command.add_argument("--output-space", choices=("input", "canonical"), help="Override the output coordinate space")
-    infer.add_argument("--texture-size", type=int, default=4096, help="Texture size per mesh part (default: 4096)")
+        command.add_argument("--min-view-iou", type=float, help="Discard reference views below this silhouette IoU after alignment (0 to 1; default: 0.6)")
+        command.add_argument("--independent-camera-estimation", action=argparse.BooleanOptionalAction, default=None, help="Estimate each missing reference camera separately; recommended for multi-image input on low-VRAM GPUs (default: joint estimation)")
+    infer.add_argument("--texture-size", type=int, default=4096, help="Maximum texture edge per mesh part (default: 4096)")
+    infer.add_argument("--texture-budget", type=int, default=0, help="Optional object pixel budget per PBR map type = edge squared (e.g. 8192); may reduce fine texture detail (power of two >=256; default: 0, disabled)")
     infer.add_argument("--decimation-target", type=int, default=500000, help="Per-part face cap (default: 500000); target is min(cap, face_count/5)")
-    infer.add_argument("--low-memory", action="store_true", help="Use smaller batches and camera CPU offload; retain resolutions, steps and patch sizes")
+    infer.add_argument("--low-memory", action="store_true", help="Use smaller batches, bounded decode parts and camera CPU offload; retain resolutions and sampling steps")
     infer.add_argument("--shape-batch-size", type=int, default=None, help="Shape patches per model batch (default: 12)")
     infer.add_argument("--pbr-batch-size", type=int, default=None, help="PBR patches per model batch (default: 8)")
     infer.add_argument("--camera-batch-size", type=int, default=None, help="Image encoding, independent camera-view attention and dense-head batch size (default: adaptive head, all views elsewhere)")
@@ -102,7 +105,7 @@ def main(argv=None):
     infer.add_argument("--decode-local-resolution", type=int, default=1024, help="Local VAE decode grid resolution (default: 1024)")
     infer.add_argument("--decode-patch-size", type=int, default=64, help="Local SLat decode patch edge (default: 64)")
     infer.add_argument("--decode-overlap", type=int, default=2, help="Overlapping SLat cells between decode patches (default: 2)")
-    infer.add_argument("--decode-cell-limit", type=int, default=25000, help="Split decode patches above this latent-cell count (default: 25000)")
+    infer.add_argument("--decode-cell-limit", type=int, default=None, help="Split coarse and refinement decode patches above this latent-cell count (default: 25000; --low-memory: 8000)")
     infer.add_argument("--cpu-threads", type=int, default=4, help="Main-process Torch CPU threads (default: 4)")
     args = parser.parse_args(argv)
 
@@ -111,7 +114,7 @@ def main(argv=None):
             from .inference import RunOptions, run_inference
             option_factory = RunOptions.for_low_memory if args.low_memory else RunOptions
             options = option_factory(**{name: getattr(args, name) for name in (
-                "texture_size", "decimation_target", "shape_batch_size", "pbr_batch_size",
+                "texture_size", "texture_budget", "decimation_target", "shape_batch_size", "pbr_batch_size",
                 "camera_batch_size", "camera_token_batch_size",
                 "camera_offload_encoder",
                 "camera_offload_features",

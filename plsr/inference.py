@@ -33,14 +33,16 @@ class RunOptions:
     decode_overlap: int = 2
     decode_cell_limit: int = 25000
     cpu_threads: int = 4
+    texture_budget: int | None = 0
 
     @classmethod
     def for_low_memory(cls, **overrides):
-        """Batch independent work and offload camera features; keep quality settings."""
+        """Bound batches and decode parts; retain sampling and resolution settings."""
         return cls(**{
             "shape_batch_size": 4, "pbr_batch_size": 4,
             "camera_batch_size": 1, "camera_token_batch_size": 2048,
             "camera_offload_encoder": True, "camera_offload_features": True,
+            "decode_cell_limit": 8000,
             **overrides,
         })
 
@@ -48,6 +50,8 @@ class RunOptions:
         """Validate execution sizes, patch overlap and optional mesh export controls."""
         if self.texture_size is not None and (type(self.texture_size) is not int or self.texture_size <= 0):
             raise ValueError("texture_size must be a positive integer or None")
+        from trellis2.utils.texture_budget import validate_texture_budget
+        validate_texture_budget(4096 if self.texture_size is None else self.texture_size, self.texture_budget)
         for name in ("shape_batch_size", "pbr_batch_size", "cpu_threads", "decode_cell_limit"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
@@ -121,7 +125,7 @@ def run_inference(config, plsr_repo_id=None, *, trellis2_repo_id=None, dino_repo
             gpu=torch.cuda.get_device_name(),
         )
         return pipeline.run(
-            config, texture_size=options.texture_size,
+            config, texture_size=options.texture_size, texture_budget=options.texture_budget,
             decimation_target=options.decimation_target, shape_batch_size=options.shape_batch_size,
             pbr_batch_size=options.pbr_batch_size,
             camera_batch_size=options.camera_batch_size,

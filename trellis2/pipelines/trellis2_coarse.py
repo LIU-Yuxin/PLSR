@@ -26,7 +26,7 @@ class CoarseLatents:
 
 
 def preprocess_coarse_image(image, remove_background=None):
-    """Keep example.py's effective 1024 preprocessing and foreground square crop.
+    """Resize the long edge to 1024 and crop a square around the foreground.
 
     This crop is only the coarse generation condition. PLSR keeps its original
     full-resolution reference image, and warns before any resizing.
@@ -60,7 +60,7 @@ class Trellis2CoarsePipeline(Pipeline):
     """Run the needed upstream 1024 path, separately from PLSR's adapted weights.
 
     Sparse structure, Shape, PBR and image encoder are placed on the device by
-    stage. The codec owns the two VAE decoders. No legacy sampler or probe path.
+    stage. The codec owns the two VAE decoders.
     """
 
     model_names = ("sparse_structure_flow_model", "sparse_structure_decoder",
@@ -77,6 +77,8 @@ class Trellis2CoarsePipeline(Pipeline):
         self.model_sources = {}
         self._device = torch.device(device)
         self.low_vram = low_vram
+        self.configure_decode(25000)
+        self.configure_export(4096, 0)
         self.samplers = {}
         for role in ("sparse_structure", "shape_slat", "tex_slat"):
             sampler = config[f"{role}_sampler"]
@@ -146,9 +148,22 @@ class Trellis2CoarsePipeline(Pipeline):
             "model_torso_dtypes": {name: str(model.dtype) for name, model in models.items() if hasattr(model, "dtype")},
             "samplers": {role: self.config[f"{role}_sampler"] for role in self.samplers},
             "remesh": True, "remesh_band": 1, "remesh_project": 0,
-            "texture_size": 4096, "decimation_target": 1000000,
-            "decode": {"patch_size": 48, "overlap": 4, "cell_limit": 25000, "recenter_min_cells": 200},
+            "texture_size": self.texture_size, "texture_budget": self.texture_budget,
+            "decimation_target": 1000000,
+            "decode": {"patch_size": 48, "overlap": 4, "cell_limit": self.decode_cell_limit, "recenter_min_cells": 200},
         }
+
+    def configure_decode(self, cell_limit):
+        """Bound coarse VAE parts without changing its sampling recipe or grid."""
+        if type(cell_limit) is not int or cell_limit <= 0:
+            raise ValueError("cell_limit must be a positive integer")
+        self.decode_cell_limit = cell_limit
+
+    def configure_export(self, texture_size=4096, texture_budget=0):
+        """Share SR's texture cap and object budget with generated coarse meshes."""
+        from ..utils.texture_budget import validate_texture_budget
+        validate_texture_budget(texture_size, texture_budget)
+        self.texture_size, self.texture_budget = texture_size, texture_budget
 
     def to(self, device):
         self._device = torch.device(device)
@@ -213,7 +228,7 @@ class Trellis2CoarsePipeline(Pipeline):
         pbr = pbr * std + mean
         return CoarseLatents(shape, pbr, image)
 
-    def decode_parts(self, latents, *, on_event=None):
+    def decode_parts(self, latents, *, patches=None, on_event=None):
         """Decode all coarse parts sequentially, retaining global coordinates."""
         from ..utils.slat_decode import plan_coarse_decode_patches
         from ..utils.slat_patches import require_aligned
@@ -221,7 +236,8 @@ class Trellis2CoarsePipeline(Pipeline):
         if latents.resolution != 1024:
             raise ValueError("Original coarse decoding requires resolution 1024")
         require_aligned(latents.shape, latents.pbr, "coarse PBR latent")
-        patches = plan_coarse_decode_patches(latents.shape)
+        if patches is None:
+            patches = plan_coarse_decode_patches(latents.shape, cell_limit=self.decode_cell_limit)
         if on_event is not None:
             on_event("decode_plan", latent_cells=len(latents.shape.coords), parts=len(patches),
                      selected_cells=sum(len(patch.indices) for patch in patches))
@@ -246,20 +262,27 @@ class Trellis2CoarsePipeline(Pipeline):
             del mesh
 
     def export(self, latents, *, verbose=True, on_event=None):
-        """Bake in the original coarse GLB frame with example.py's settings."""
+        """Bake coarse mesh parts into a textured scene in GLB coordinates."""
         import trimesh
         from ..utils.mesh_export import bake_coarse_mesh
+        from ..utils.slat_decode import plan_coarse_decode_patches
+        from ..utils.texture_budget import plan_texture_budget
 
         scene = trimesh.Scene()
-        parts = self.decode_parts(latents, **({"on_event": on_event} if on_event is not None else {}))
+        patches = plan_coarse_decode_patches(latents.shape, cell_limit=self.decode_cell_limit)
+        plan = plan_texture_budget([len(patch.indices) for patch in patches],
+                                   texture_size=self.texture_size, texture_budget=self.texture_budget)
+        plan.log(on_event)
+        parts = self.decode_parts(latents, patches=patches, **({"on_event": on_event} if on_event is not None else {}))
         for index, mesh in enumerate(parts):
+            texture_size = plan.sizes[index]
             if verbose:
                 print(f"Baking coarse part {index + 1}", flush=True)
             if on_event is not None:
                 on_event("part_bake_start", part=index, vertices=len(mesh.vertices),
                          faces=len(mesh.faces), material_voxels=len(mesh.coords),
-                         target_faces=1000000, texture_size=4096)
-            textured = bake_coarse_mesh(mesh, index=index, verbose=verbose,
+                         target_faces=1000000, texture_size=texture_size)
+            textured = bake_coarse_mesh(mesh, texture_size=texture_size, index=index, verbose=verbose,
                                         **({"on_event": on_event} if on_event is not None else {}))
             scene.add_geometry(textured, node_name=f"coarse_{index}", geom_name=f"coarse_{index}")
             if on_event is not None:

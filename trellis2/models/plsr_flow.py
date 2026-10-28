@@ -21,8 +21,7 @@ class PLSRFlowModel(nn.Module):
     """Shared modulation, convolutional LR features and gated local attention.
 
     State names match the trained architecture. ``load_pretrained_denoiser``
-    loads the base weights followed by the LoRA/PLSR adapter. This class
-    deliberately supplies no training initialization or experimental fuse modes.
+    loads the base weights followed by the LoRA/PLSR adapter.
     """
 
     @classmethod

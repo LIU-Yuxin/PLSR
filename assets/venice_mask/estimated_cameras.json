@@ -1,0 +1,33 @@
+{
+  "mesh": "coarse_1024.glb",
+  "images": [
+    {
+      "path": "images/view_00_yaw_000.png"
+    },
+    {
+      "path": "images/view_01_yaw_060.png"
+    },
+    {
+      "path": "images/view_02_yaw_120.png"
+    },
+    {
+      "path": "images/view_03_yaw_180.png"
+    },
+    {
+      "path": "images/view_04_yaw_240.png"
+    },
+    {
+      "path": "images/view_05_yaw_300.png"
+    }
+  ],
+  "output_dir": "../../outputs/venice_mask_estimated_cameras",
+  "resolution_sequence": [
+    640,
+    1280
+  ],
+  "seed": 42,
+  "decode_intermediate": false,
+  "output_space": "input",
+  "min_view_iou": 0.6,
+  "independent_camera_estimation": false
+}

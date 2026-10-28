@@ -67,8 +67,7 @@ class SparseChannel2Spatial(nn.Module):
 
     def forward(self, x: SparseTensor, subdivision: Optional[SparseTensor] = None) -> SparseTensor:
         DIM = x.coords.shape[-1] - 1
-        # print("SparseChannels2Spatial", x.coords.shape, subdivision.coords.shape)
-        if not (x.coords == subdivision.coords).all():
+        if subdivision is not None and not (x.coords == subdivision.coords).all():
             max_coords = x.coords[:, 1:].max(dim=0).values + 1
             max_coord = max(max_coords.max().item(), 64)
             x_keys = coords_to_key(x.coords, max_coord=max_coord)

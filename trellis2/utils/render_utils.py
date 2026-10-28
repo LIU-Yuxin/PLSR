@@ -90,7 +90,6 @@ def get_renderer(sample, **kwargs):
 
 def render_frames(sample, extrinsics, intrinsics, options={}, verbose=True, **kwargs):
     renderer = get_renderer(sample, **options)
-    print("Rendering with options:", renderer.rendering_options, type(sample), type(renderer), kwargs.keys())
     rets = {}
     for j, (extr, intr) in tqdm(enumerate(zip(extrinsics, intrinsics)), total=len(extrinsics), desc='Rendering', disable=not verbose):
         res = renderer.render(sample, extr, intr, **kwargs)
@@ -98,7 +97,6 @@ def render_frames(sample, extrinsics, intrinsics, options={}, verbose=True, **kw
             if k not in rets: rets[k] = []
             if v.dim() == 2: v = v[None].repeat(3, 1, 1)
             rets[k].append(np.clip(v.detach().cpu().numpy().transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8))
-    print("Rendered keys:", rets.keys())
     return rets
 
 

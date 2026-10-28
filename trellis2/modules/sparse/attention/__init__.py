@@ -6,7 +6,6 @@ from pathlib import Path
 __attributes = {
     "sparse_scaled_dot_product_attention": "full_attn",
     "sparse_windowed_scaled_dot_product_self_attention": "windowed_attn",
-    "sparse_windowed_scaled_dot_product_cross_attention": "windowed_attn",
     "SparseMultiHeadRMSNorm": "modules",
     "SparseMultiHeadAttention": "modules",
     "SparseRotaryPositionEmbedder": "rope",

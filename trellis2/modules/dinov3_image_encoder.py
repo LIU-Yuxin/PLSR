@@ -1,4 +1,4 @@
-"""Hugging Face DINOv3 image conditioning with the established numerics."""
+"""Image conditioning tokens from a Hugging Face DINOv3 model."""
 
 import numpy as np
 from PIL import Image
@@ -37,8 +37,7 @@ class DinoV3ImageEncoder(nn.Module):
         if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
             raise ValueError("DINOv3 image tensors must be finite and in [0,1]")
         images = self.normalize(images.to(device))
-        # The established HF path quantizes the input to bf16 before casting
-        # back to the patch embedding's dtype. Keep that operation order.
+        # Round inputs through bf16 before converting to the patch embedding's dtype.
         images = images.to(torch.bfloat16).to(self.model.embeddings.patch_embeddings.weight.dtype)
         features = self.model.embeddings(images, bool_masked_pos=None)
         positions = self.model.rope_embeddings(images)

@@ -201,7 +201,7 @@ class SLatCodec(Pipeline):
         )
 
     def decode_parts(self, shape, pbr, resolution, *, local_resolution=1024,
-                     patch_size=64, overlap=2, cell_limit=25000, on_event=None):
+                     patch_size=64, overlap=2, cell_limit=25000, patches=None, on_event=None):
         """Yield CPU mesh parts in local space with explicit placement transforms.
 
         resolution describes the full asset; local_resolution describes each
@@ -217,8 +217,9 @@ class SLatCodec(Pipeline):
         require_aligned(shape, pbr, "PBR latent")
 
         # 1. Plan matching Shape/PBR patches in the decoder's local coordinate frame.
-        patches = plan_decode_patches(shape, local_resolution=local_resolution,
-                                      patch_size=patch_size, overlap=overlap, cell_limit=cell_limit)
+        if patches is None:
+            patches = plan_decode_patches(shape, local_resolution=local_resolution,
+                                          patch_size=patch_size, overlap=overlap, cell_limit=cell_limit)
         if on_event is not None:
             on_event("decode_plan", latent_cells=len(shape.coords), parts=len(patches),
                      selected_cells=sum(len(patch.indices) for patch in patches),

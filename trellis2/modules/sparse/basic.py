@@ -715,9 +715,6 @@ class SparseTensor(VarLenTensor):
         return new_cache
     
     def __elemwise__(self, other: Union[torch.Tensor, VarLenTensor], op: callable) -> 'SparseTensor':
-        # print("Type of other:", type(other))
-        # print("Shape of other:", other.shape if hasattr(other, 'shape') else None)
-        # print("Self.layout:", self.layout)
         if isinstance(other, torch.Tensor):
             try:
                 other = torch.broadcast_to(other, self.shape)
@@ -726,7 +723,6 @@ class SparseTensor(VarLenTensor):
                 pass
         if isinstance(other, VarLenTensor):
             other = other.feats
-        # print("Basic sparse elemwise operation.", self.feats.shape, other.shape)
         new_feats = op(self.feats, other)
         new_tensor = self.replace(new_feats)
         if isinstance(other, SparseTensor):
@@ -839,12 +835,6 @@ def sparse_unbind(input: SparseTensor, dim: int) -> List[SparseTensor]:
         feats = input.feats.unbind(dim)
         return [input.replace(f) for f in feats]
 
-def key_to_coords(key: torch.Tensor, max_coord: int = 64):
-    assert key.ndim == 1
-    z = key // (max_coord ** 2)
-    y = (key % (max_coord ** 2)) // max_coord
-    x = key % max_coord
-    return torch.stack([x, y, z], dim=-1)
 
 def coords_to_key(coords: torch.Tensor, max_coord: int = 64):
     assert coords.ndim == 2 and (coords.shape[1] == 3 or coords.shape[1] == 4)
@@ -857,142 +847,3 @@ def coords_to_key(coords: torch.Tensor, max_coord: int = 64):
         keys = x + y * max_coord + z * (max_coord ** 2)
         keys = keys + batch_idx * (max_coord ** 3)
     return keys
-
-def key_to_indices(data_keys: torch.Tensor, query_keys: torch.Tensor):
-    """
-    Given data_keys [M] and query_keys [N], return indices [N] where data_keys[indices] = query_keys,
-    or -1 if not found.
-    可以用于体素化point cloud到sparse voxel grid的索引映射
-    """
-    assert data_keys.ndim == 1 and query_keys.ndim == 1, f"{data_keys.shape} vs {query_keys.shape}"
-    assert data_keys.dtype == query_keys.dtype, f"{data_keys.dtype} vs {query_keys.dtype}"
-    device = data_keys.device
-    q_unique, q_indices = torch.unique(query_keys, return_inverse=True) ## 获取唯一值及其索引
-    d_sorted, d_indices = torch.sort(data_keys) ## 对data_keys排序，获取排序后的值及其原始索引
-    match_indices = torch.searchsorted(d_sorted, q_unique, side='left') ## 在排序后的data_keys中查找query_keys的插入位置
-
-    match_indices[match_indices >= d_sorted.shape[0]] = d_sorted.shape[0]-1 ## 防止越界
-    found = d_sorted[match_indices] == q_unique ## 如果不越界且插入位置元素等于插入值，代表存在对应
-    result_indices = torch.full((q_unique.shape[0],), -1, dtype=torch.long, device=device) ## 初始化结果索引，全为-1
-    result_indices[found] = d_indices[match_indices[found]] ## 将找到的索引映射回原始data_keys索引
-    return result_indices[q_indices] ## 根据q_indices还原为query_keys对应的索引结果
-
-# def key_to_indices(data_keys: torch.Tensor, query_keys: torch.Tensor):
-#     """
-#     Given data_keys [M] and query_keys [N], return indices [N] where data_keys[indices] = query_keys,
-#     or -1 if not found.
-#     可以用于体素化point cloud到sparse voxel grid的索引映射
-#     """
-#     assert data_keys.ndim == 1 and query_keys.ndim == 1, f"{data_keys.shape} vs {query_keys.shape}"
-#     assert data_keys.dtype == query_keys.dtype, f"{data_keys.dtype} vs {query_keys.dtype}"
-#     device = data_keys.device
-#     # q_unique, q_indices = torch.unique(query_keys, return_inverse=True) ## 获取唯一值及其索引
-#     d_sorted, d_indices = torch.sort(data_keys) ## 对data_keys排序，获取排序后的值及其原始索引
-#     match_indices = torch.searchsorted(d_sorted, query_keys, side='left') ## 在排序后的data_keys中查找query_keys的插入位置
-
-#     match_indices = torch.clamp(match_indices, max=d_sorted.shape[0]-1) ## 防止越界
-#     found = d_sorted[match_indices] == query_keys ## 如果不越界且插入位置元素等于插入值，代表存在对应
-#     result_indices = torch.full((query_keys.shape[0],), -1, dtype=torch.long, device=device) ## 初始化结果索引，全为-1
-#     result_indices[found] = d_indices[match_indices[found]] ## 将找到的索引映射回原始data_keys索引
-#     return result_indices[q_indices] ## 根据q_indices还原为query_keys对应的索引结果
-
-def coords_intersect(source_coords: torch.Tensor, target_coords: torch.Tensor):
-    max_coord = max(source_coords.max().item(), target_coords.max().item()) + 1
-    source_keys = coords_to_key(source_coords, max_coord)
-    target_keys = coords_to_key(target_coords, max_coord)
-    indices = key_to_indices(source_keys, target_keys)
-    return indices
-
-def coords_union(source_coords: torch.Tensor, target_coords: torch.Tensor, batched=False):
-    if batched:
-        all_coords = []
-        batch_size = source_coords[:, 0].max().item() + 1
-        for b in range(batch_size):
-            src_coords_b = source_coords[source_coords[:, 0] == b][:, 1:]
-            tgt_coords_b = target_coords[target_coords[:, 0] == b][:, 1:]
-            combined_coords_b = torch.cat([src_coords_b, tgt_coords_b], dim=0)
-            unique_coords_b = torch.unique(combined_coords_b, dim=0)
-            batch_indices = torch.full((unique_coords_b.shape[0], 1), b, dtype=unique_coords_b.dtype, device=unique_coords_b.device)
-            all_coords.append(torch.cat([batch_indices, unique_coords_b], dim=1))
-        all_coords = torch.cat(all_coords, dim=0)
-    else:
-        combined_coords = torch.cat([source_coords, target_coords], dim=0)
-        all_coords = torch.unique(combined_coords, dim=0)
-    return all_coords
-    
-
-def sparse_gather_nearest(source: SparseTensor, target: SparseTensor, matched_only=False, default_value="zero", debug=False, return_valid_mask=False) -> SparseTensor:
-    """
-    Gather features from source sparse tensor to target sparse tensor based on nearest neighbor search.
-    
-    Args:
-        source (SparseTensor): Source sparse tensor.
-        target (SparseTensor): Target sparse tensor.
-    """
-    from pytorch3d.ops import knn_points
-
-    batch_size = source.shape[0]
-    valid_mask_list = []
-    if default_value == "zero":
-        feats = torch.zeros([target.feats.shape[0], *source.feats.shape[1:]]).to(target.feats)
-    elif default_value == "target":
-        assert source.shape == target.shape, f"Source and target shapes must match for 'target' default value. {source.shape} vs {target.shape}"
-        feats = target.feats.clone()
-    else:
-        raise ValueError(f"Unknown default_value: {default_value}")
-    for b in range(batch_size):
-        if target.layout[b].stop - target.layout[b].start == 0:
-            continue
-        if source.layout[b].stop - source.layout[b].start == 0:
-            continue
-        src_coords = source.coords[source.layout[b]][:, 1:] #.unsqueeze(0).float()
-        tgt_coords = target.coords[target.layout[b]][:, 1:] #.unsqueeze(0).float()
-        if debug:
-            print("Batch", b, "Source Coords Shape:", src_coords.shape, "Target Coords Shape:", tgt_coords.shape)
-        matched_indices = coords_intersect(src_coords, tgt_coords)
-        valid_mask = matched_indices != -1
-        valid_indices = matched_indices[valid_mask]
-        b_feats = source.feats[source.layout[b]]
-        matched_feats = b_feats[valid_indices]
-        valid_mask_list.append(valid_mask)
-        if debug:
-            print("Feats shape:", feats.shape, "layout:", target.layout, "Feats layout shape:", feats[target.layout[b]].shape, "Valid mask:", valid_mask.sum().item(), "Matched feats shape:", matched_feats.shape)
-        feats[target.layout[b]][valid_mask] = matched_feats.contiguous()
-
-        unhandled_mask = ~valid_mask
-        if debug:
-            print(f"Gathered Intersect Unhandled Nearest Distance Batch {b}: matched count={valid_mask.sum().item()} count={unhandled_mask.sum().item()}, percent_unhandled={unhandled_mask.sum().item()/len(unhandled_mask):.4f}")
-
-        
-        if unhandled_mask.sum() > 0 and not matched_only:
-            tgt_coords_unhandled = tgt_coords[unhandled_mask].unsqueeze(0).float()
-            src_coords_handled = src_coords[valid_indices].unsqueeze(0).float()
-            with torch.no_grad():
-                dist, idx, _ = knn_points(tgt_coords_unhandled, src_coords_handled, K=1)
-            idx = idx[0, :, 0]
-            gathered_feats = b_feats[idx]
-            feats[target.layout[b]][unhandled_mask] = gathered_feats.contiguous()
-            if debug:
-                print(f"    - Distance mean={dist.mean().item()}, max={dist.max().item()}")
-
-        # start_time = time.time()
-        # dist, idx, _ = knn_points(tgt_coords, src_coords, K=1)
-        # torch.cuda.synchronize()
-        # print(f"KNN Batch {b} Time: {time.time() - start_time:.4f}s")
-        # idx = idx[0, :, 0]
-        # gathered_feats = source.feats[source.layout[b]][idx]
-        # feats[target.layout[b]] = gathered_feats
-        
-
-    # print("Sparse Gather Nearest Completed.", feats.shape, target.feats.shape, target.coords.shape)
-    target = SparseTensor(
-        feats=feats,
-        coords=target.coords,
-        shape=target.shape,
-        layout=target.layout,
-    )
-    if return_valid_mask:
-        valid_mask = torch.cat(valid_mask_list, dim=0)
-        return target, valid_mask
-    else:
-        return target

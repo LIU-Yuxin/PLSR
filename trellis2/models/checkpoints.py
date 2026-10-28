@@ -10,7 +10,7 @@ from ..modules.sparse.lora import enable_sparse_lora
 
 
 def read_state_dict(path) -> dict[str, torch.Tensor]:
-    """Read flat tensor checkpoints with correct suffixes; never guess or retry formats."""
+    """Read a flat tensor state dictionary from a .pt or .safetensors file."""
     path = Path(path)
     if path.suffix == ".pt":
         state = torch.load(path, map_location="cpu", weights_only=True)
@@ -27,8 +27,8 @@ def read_state_dict(path) -> dict[str, torch.Tensor]:
 
 
 def _lora_config(model, config):
-    # Training used substring exclusions, then enumerated Linear/Conv modules.
-    # Keep that selection exactly; PEFT's own exclusion matching is different.
+    # Checkpoint targets use substring exclusions before selecting Linear/Conv
+    # modules; PEFT's built-in exclusion matching has different semantics.
     config = deepcopy(config)
     if config.get("target_modules") != "all-linear" or not isinstance(config.get("exclude_modules"), list):
         raise ValueError("PLSR requires all-linear targets and an explicit substring exclusion list")
@@ -50,9 +50,9 @@ def _lora_config(model, config):
 def load_pretrained_denoiser(config, base_path, adapter_path):
     """Load the upstream base, then the trained LoRA and PLSR parameters.
 
-    Keep the training-time target selection, SparseTensor adaptation, model
-    precision and unmerged LoRA execution. Fixed gates/norms retain their
-    constructor defaults; no separate checkpoint identity manifest is needed.
+    LoRA targets follow the checkpoint's substring rules. SparseTensor support
+    is applied to unmerged LoRA layers. Fixed gates/norms keep their constructor
+    defaults.
     """
     from .plsr_flow import PLSRFlowModel
 

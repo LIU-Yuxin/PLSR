@@ -31,7 +31,7 @@ Usage: . ./setup.sh [OPTIONS]
   -h, --help       Show this help.
 
 Options can be combined or run separately. Prepare a CUDA Toolkit and C++
-compiler before building extensions. See docs/INSTALL.md for the full command.
+compiler before building extensions. See README.md#installation for the full command.
 With an existing environment, omit --new-env and use 'bash setup.sh ...'.
 EOF
                 return 0
@@ -52,7 +52,7 @@ EOF
     done
 
     if [[ "$(uname -s)" != Linux ]]; then
-        echo 'This installer targets Linux/WSL; see docs/INSTALL_WINDOWS.md for Windows.' >&2
+        echo 'This installer targets Linux/WSL; see README.md#windows for Windows.' >&2
         return 2
     fi
 

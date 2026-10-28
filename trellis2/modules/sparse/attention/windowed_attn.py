@@ -8,7 +8,6 @@ from .full_attn import _sdpa_varlen
 
 __all__ = [
     'sparse_windowed_scaled_dot_product_self_attention',
-    'sparse_windowed_scaled_dot_product_cross_attention',
 ]
 
 
@@ -50,6 +49,10 @@ def calc_window_partition(
     mask = seq_lens != 0
     seq_lens = seq_lens[mask]
     
+    # UPSTREAM_REVIEW_NOTE (TRELLIS.2 75fbf018):
+    # Automated code review flagged a possible inherited bug: the backend config
+    # accepts flash_attn_3, but windowed attention has no implementation for it.
+    # Upstream behavior is preserved.
     if config.ATTN == 'sdpa':
         attn_func_args = {}
     elif config.ATTN == 'xformers':
@@ -128,73 +131,3 @@ def sparse_windowed_scaled_dot_product_self_attention(
         assert torch.equal(qkv_coords, qkv.coords), "SparseWindowedScaledDotProductSelfAttention: coordinate mismatch"
 
     return qkv.replace(out)
-
-
-def sparse_windowed_scaled_dot_product_cross_attention(
-    q: SparseTensor,
-    kv: SparseTensor,
-    q_window_size: int,
-    kv_window_size: int,
-    q_shift_window: Tuple[int, int, int] = (0, 0, 0),
-    kv_shift_window: Tuple[int, int, int] = (0, 0, 0),
-) -> SparseTensor:
-    """
-    Apply windowed scaled dot product cross attention to two sparse tensors.
-
-    Args:
-        q (SparseTensor): [N, *, H, C] sparse tensor containing Qs.
-        kv (SparseTensor): [N, *, 2, H, C] sparse tensor containing Ks and Vs.
-        q_window_size (int): The window size to use for Qs.
-        kv_window_size (int): The window size to use for Ks and Vs.
-        q_shift_window (Tuple[int, int, int]): The shift of serialized coordinates for Qs.
-        kv_shift_window (Tuple[int, int, int]): The shift of serialized coordinates for Ks and Vs.
-        
-    Returns:
-        (SparseTensor): [N, *, H, C] sparse tensor containing the output features.
-    """
-    assert len(q.shape) == 3, f"Invalid shape for q, got {q.shape}, expected [N, *, H, C]"
-    assert len(kv.shape) == 4 and kv.shape[1] == 2, f"Invalid shape for kv, got {kv.shape}, expected [N, *, 2, H, C]"
-
-    q_serialization_spatial_cache_name = f'windowed_attention_{q_window_size}_{q_shift_window}'
-    q_serialization_spatial_cache = q.get_spatial_cache(q_serialization_spatial_cache_name)
-    if q_serialization_spatial_cache is None:
-        q_fwd_indices, q_bwd_indices, q_seq_lens, q_attn_func_args = calc_window_partition(q, q_window_size, q_shift_window)
-        q.register_spatial_cache(q_serialization_spatial_cache_name, (q_fwd_indices, q_bwd_indices, q_seq_lens, q_attn_func_args))
-    else:
-        q_fwd_indices, q_bwd_indices, q_seq_lens, q_attn_func_args = q_serialization_spatial_cache
-    kv_serialization_spatial_cache_name = f'windowed_attention_{kv_window_size}_{kv_shift_window}'
-    kv_serialization_spatial_cache = kv.get_spatial_cache(kv_serialization_spatial_cache_name)
-    if kv_serialization_spatial_cache is None:
-        kv_fwd_indices, kv_bwd_indices, kv_seq_lens, kv_attn_func_args = calc_window_partition(kv, kv_window_size, kv_shift_window)
-        kv.register_spatial_cache(kv_serialization_spatial_cache_name, (kv_fwd_indices, kv_bwd_indices, kv_seq_lens, kv_attn_func_args))
-    else:
-        kv_fwd_indices, kv_bwd_indices, kv_seq_lens, kv_attn_func_args = kv_serialization_spatial_cache
-
-    assert len(q_seq_lens) == len(kv_seq_lens), "Number of sequences in q and kv must match"
-
-    q_feats = q.feats[q_fwd_indices]      # [M, H, C]
-    kv_feats = kv.feats[kv_fwd_indices]    # [M, 2, H, C]
-
-    if config.ATTN == 'sdpa':
-        k, v = kv_feats.unbind(dim=1)
-        out = _sdpa_varlen(q_feats, k, v, q_seq_lens.tolist(), kv_seq_lens.tolist())
-    elif config.ATTN == 'xformers':
-        if 'xops' not in globals():
-            import xformers.ops as xops
-        k, v = kv_feats.unbind(dim=1)                                                   # [M, H, C]
-        q = q.unsqueeze(0)                                                              # [1, M, H, C]
-        k = k.unsqueeze(0)                                                              # [1, M, H, C]
-        v = v.unsqueeze(0)                                                              # [1, M, H, C]
-        mask = xops.fmha.BlockDiagonalMask.from_seqlens(q_seq_lens, kv_seq_lens)
-        out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)[0]               # [M, H, C]
-    elif config.ATTN == 'flash_attn':
-        if 'flash_attn' not in globals():
-            import flash_attn
-        out = flash_attn.flash_attn_varlen_kvpacked_func(q_feats, kv_feats,
-            cu_seqlens_q=q_attn_func_args['cu_seqlens'], cu_seqlens_k=kv_attn_func_args['cu_seqlens'],
-            max_seqlen_q=q_attn_func_args['max_seqlen'], max_seqlen_k=kv_attn_func_args['max_seqlen'],
-        )  # [M, H, C]
-
-    out = out[q_bwd_indices]      # [T, H, C]
-
-    return q.replace(out)

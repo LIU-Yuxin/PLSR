@@ -240,4 +240,4 @@ if ($NvDiffRec) {
 & conda env config vars set --prefix $env:CONDA_PREFIX ATTN_BACKEND=sdpa SPARSE_ATTN_BACKEND=sdpa
 Assert-LastExit 'Save Windows attention backends'
 & conda run --no-capture-output --prefix $env:CONDA_PREFIX python --version
-Assert-LastExit 'Fresh Conda activation (see docs/INSTALL_WINDOWS.md for compiler-hook troubleshooting)'
+Assert-LastExit 'Fresh Conda activation'

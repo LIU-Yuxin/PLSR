@@ -17,6 +17,8 @@ from plsr.geometry import canonicalize_mesh
 from plsr.inputs import validate_inputs
 from .reference_images import prepare_reference_images
 from ..utils.mesh_export import assemble_parts
+from ..utils.slat_decode import plan_decode_patches
+from ..utils.texture_budget import validate_texture_budget
 from ..utils.slat_io import load_latents, save_latents
 
 
@@ -99,7 +101,7 @@ class PLSRPipeline:
 
     @torch.no_grad()
     def run(self, config=None, *, images=None, mesh=None, output_dir=None,
-            remove_background=None, texture_size=4096,
+            remove_background=None, texture_size=4096, texture_budget=0,
             decimation_target=500000, shape_batch_size=12, pbr_batch_size=8,
             camera_batch_size=None, camera_token_batch_size=None, camera_offload_encoder=False,
             camera_offload_features=False,
@@ -133,6 +135,7 @@ class PLSRPipeline:
             texture_size = 4096
         if type(texture_size) is not int or texture_size <= 0:
             raise ValueError("texture_size must be a positive integer or None")
+        validate_texture_budget(texture_size, texture_budget)
         for size in (shape_batch_size, pbr_batch_size):
             if type(size) is not int or size <= 0:
                 raise ValueError("Texture and sampler batch sizes must be positive integers")
@@ -176,7 +179,8 @@ class PLSRPipeline:
                   "input_space": "supplied_mesh" if config.mesh is not None else "generated_coarse_glb",
                   "decode": {"local_resolution": decode_local_resolution, "patch_size": decode_patch_size,
                              "overlap": decode_overlap, "cell_limit": decode_cell_limit},
-                  "texture_size": texture_size, "decimation_target": decimation_target,
+                  "texture_size": texture_size, "texture_budget": texture_budget,
+                  "decimation_target": decimation_target,
                   "postprocess": {"remesh": True, "remesh_band": 1, "remesh_project": 0},
                   "shape_batch_size": shape_batch_size, "pbr_batch_size": pbr_batch_size,
                   "camera_batch_size": camera_batch_size,
@@ -295,12 +299,16 @@ class PLSRPipeline:
 
             log("export_start", latent_cells=len(shape.coords))
             try:
+                patches = plan_decode_patches(shape, local_resolution=decode_local_resolution,
+                                              patch_size=decode_patch_size, overlap=decode_overlap,
+                                              cell_limit=decode_cell_limit)
                 scene = assemble_parts(
                     self.codec.decode_parts(shape, pbr, resolution,
                                             local_resolution=decode_local_resolution,
                                             patch_size=decode_patch_size, overlap=decode_overlap,
-                                            cell_limit=decode_cell_limit, on_event=log),
-                    canonical_to_input=transform, texture_size=texture_size,
+                                            cell_limit=decode_cell_limit, patches=patches, on_event=log),
+                    canonical_to_input=transform, texture_size=texture_size, texture_budget=texture_budget,
+                    part_weights=[len(patch.indices) for patch in patches],
                     decimation_target=decimation_target, verbose=verbose, on_event=log,
                 )
                 path = output / f"mesh_{resolution}.glb"
@@ -363,6 +371,11 @@ class PLSRPipeline:
                         timing_event("coarse_cache_reuse", 0.0, resolution=1024)
                         report.setdefault("coarse", {})["mesh"] = mesh_source.name
                     else:
+                        from .trellis2_coarse import Trellis2CoarsePipeline
+                        if isinstance(self.coarse_generator, Trellis2CoarsePipeline):
+                            self.coarse_generator.configure_decode(decode_cell_limit)
+                            self.coarse_generator.configure_export(texture_size if texture_budget else 4096, texture_budget)
+                        write_json("coarse_settings.json", self.coarse_generator.settings)
                         latent_path = output / "coarse_latents.npz"
                         condition_path = output / "coarse_condition.png"
                         if latent_path.is_file() and condition_path.is_file():
@@ -373,7 +386,6 @@ class PLSRPipeline:
                                     coarse = CoarseLatents(coarse_shape, coarse_pbr, condition.copy(),
                                                            coarse_resolution)
                         else:
-                            write_json("coarse_settings.json", self.coarse_generator.settings)
                             if verbose:
                                 print("Generating the original TRELLIS.2 coarse mesh at resolution 1024", flush=True)
                             with timed("coarse_generation", resolution=1024):
@@ -437,7 +449,15 @@ class PLSRPipeline:
                         aligner = RenderedReferenceAligner(self.codec.device)
                     views = prepare_reference_images(config.images, asset.input_to_canonical, remove_background=remove_background,
                                                       estimate_cameras=self.camera_estimator, canonical_scene=asset.scene,
-                                                      align_images=aligner)
+                                                      align_images=aligner,
+                                                      independent_camera_estimation=config.independent_camera_estimation)
+                    write_json("camera_framing.json", {
+                        "method": "center_projected_mesh_with_5_percent_border",
+                        "transform_space": "normalized image coordinates",
+                        "intrinsics_updated": any(record["applied"] for _, record in views.camera_framing),
+                        "extrinsics_changed": False,
+                        "views": [{"view": index, **record} for index, record in views.camera_framing],
+                    })
                     alignment_records = []
                     for index, alignment in views.alignments:
                         image_name, mask_name = f"reference_{index}_aligned.png", f"reference_{index}_target_alpha.png"
@@ -448,16 +468,43 @@ class PLSRPipeline:
                     write_json("image_alignment.json", {
                         "method": "silhouette_centroid_and_spread", "resampling": "nearest",
                         "matrix_maps": "prepared full reference pixels to target camera canvas pixels",
-                        "camera_matrices_changed": False, "views": alignment_records,
+                        "camera_matrices_changed_by_image_warp": False, "views": alignment_records,
+                        "camera_framing": "camera_framing.json",
                         "rgba_convention": "RGB already composited onto black; multiply by alpha again for SR",
                     })
+                    from .view_diagnostics import diagnose_reference_views, retain_reference_views
+
+                    diagnostics = diagnose_reference_views(
+                        views, asset.scene, config.images, output,
+                        min_iou=config.min_view_iou, device=self.codec.device,
+                    )
+                    kept = diagnostics["kept_views"]
+                    report["view_diagnostics"] = "view_diagnostics.json"
+                    report["reference_views"] = {
+                        "input_count": len(config.images), "kept": kept,
+                        "rejected": diagnostics["rejected_views"], "min_view_iou": config.min_view_iou,
+                        "independent_camera_estimation": config.independent_camera_estimation,
+                    }
+                    write_json("report.json", report)
                     write_json("cameras.json", {
                         "space": "canonical", "convention": "OpenCV world-to-camera", "intrinsics_units": "normalized",
-                        "image_size": list(views.images.shape[-2:]),
-                        "intrinsics": views.intrinsics.tolist(), "extrinsics": views.extrinsics.tolist(),
-                        "estimated_fields": [list(view.missing_camera_fields) for view in config.images],
+                        "image_size": list(views.images.shape[-2:]), "source_indices": kept,
+                        "camera_framing": "camera_framing.json",
+                        "image_alignment": "image_alignment.json",
+                        "intrinsics": views.intrinsics[:, kept].tolist(),
+                        "extrinsics": views.extrinsics[:, kept].tolist(),
+                        "estimated_fields": [list(config.images[i].missing_camera_fields) for i in kept],
                     })
-
+                    if verbose:
+                        for record in diagnostics["views"]:
+                            decision = "kept" if record["accepted"] else "rejected"
+                            print(f"Reference view {record['view']}: IoU {record['iou']:.1%}, {decision}", flush=True)
+                    if not kept:
+                        raise ValueError(
+                            f"No usable reference views meet min_view_iou={config.min_view_iou:g}. "
+                            f"Refinement stopped; inspect {output / 'view_diagnostics.json'} and its overlay images."
+                        )
+                    views = retain_reference_views(views, kept)
 
             # 6. Restore the latest available latent, or encode the base once.
             # Earlier saved levels remain listed without decompressing them.
