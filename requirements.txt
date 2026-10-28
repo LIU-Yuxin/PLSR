@@ -1,0 +1,16 @@
+# Basic Python dependencies. PyTorch and CUDA extensions are installed by setup.sh or setup.ps1.
+numpy
+Pillow
+scipy
+trimesh
+opencv-python-headless
+tqdm
+easydict
+transformers==4.57.3
+peft==0.18.0
+safetensors
+huggingface-hub
+timm
+kornia
+plyfile
+zstandard

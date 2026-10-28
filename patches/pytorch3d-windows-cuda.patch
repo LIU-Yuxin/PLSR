@@ -1,0 +1,13 @@
+--- a/pytorch3d/csrc/pulsar/global.h
++++ b/pytorch3d/csrc/pulsar/global.h
+@@ -15,8 +15,8 @@
+ #endif
+ 
+ #if defined(_WIN64) || defined(_WIN32)
+-#define uint unsigned int
+-#define ushort unsigned short
++typedef unsigned int uint;
++typedef unsigned short ushort;
+ #endif
+ 
+ #include "./logging.h" // <- include before torch/extension.h

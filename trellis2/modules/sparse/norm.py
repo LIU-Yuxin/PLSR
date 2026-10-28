@@ -1,0 +1,63 @@
+import torch
+import torch.nn as nn
+from ..utils import manual_cast
+from . import VarLenTensor
+from . import config
+
+__all__ = [
+    'SparseGroupNorm',
+    'SparseGroupNorm32',
+]
+
+
+class SparseGroupNorm(nn.GroupNorm):
+    def __init__(self, num_groups, num_channels, eps=1e-5, affine=True):
+        super(SparseGroupNorm, self).__init__(num_groups, num_channels, eps, affine)
+
+    def forward(self, input: VarLenTensor) -> VarLenTensor:
+        nfeats = torch.zeros_like(input.feats)
+        for k in range(input.shape[0]):
+            bfeats = input.feats[input.layout[k]]
+            bfeats = bfeats.permute(1, 0).reshape(1, input.shape[1], -1)
+            bfeats = super().forward(bfeats)
+            bfeats = bfeats.reshape(input.shape[1], -1).permute(1, 0)
+            nfeats[input.layout[k]] = bfeats
+        return input.replace(nfeats)
+
+
+class SparseGroupNorm32(SparseGroupNorm):
+    """
+    A GroupNorm layer that converts to float32 before the forward pass.
+    """
+    def forward(self, x: VarLenTensor) -> VarLenTensor:
+        x_dtype = x.dtype
+        x = manual_cast(x, torch.float32)
+        o = super().forward(x)
+        return manual_cast(o, x_dtype)
+
+
+class SparseRMSPerSamplePerChannel(nn.Module):
+    def __init__(self, eps: float = 1e-8):
+        super(SparseRMSPerSamplePerChannel, self).__init__()
+        self.eps = eps
+
+    def forward(self, x: VarLenTensor) -> VarLenTensor:
+        nfeats = torch.zeros_like(x.feats)
+        for k in range(x.shape[0]):
+            bfeats = x.feats[x.layout[k]]  # (N_k, C)
+            bmean = torch.mean(bfeats, dim=0, keepdim=True)  # (1, C)
+            bfeats = bfeats - bmean  # (N_k, C)
+            rms = torch.sqrt(torch.mean(bfeats ** 2, dim=0, keepdim=True) + self.eps)  # (1, C)
+            bfeats = bfeats / rms  # (N_k, C)
+            nfeats[x.layout[k]] = bfeats
+        return x.replace(nfeats)
+
+class SparseRMSPerSamplePerChannel32(SparseRMSPerSamplePerChannel):
+    """
+    A RMSNorm layer that converts to float32 before the forward pass.
+    """
+    def forward(self, x: VarLenTensor) -> VarLenTensor:
+        x_dtype = x.dtype
+        x = manual_cast(x, torch.float32)
+        o = super().forward(x)
+        return manual_cast(o, x_dtype)

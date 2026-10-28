@@ -1,0 +1,37 @@
+--- a/include/gpu/spcumc.cuh
++++ b/include/gpu/spcumc.cuh
+@@ -324,12 +324,12 @@
+     {0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}
+ };
+ 
+-// Edge i  connects EDGE_CORNERS[i][0]  ↔  EDGE_CORNERS[i][1]
++// Edge i  connects EDGE_CORNERS[i][0]  <->  EDGE_CORNERS[i][1]
+ // Matches the edge order required by edgeTable & triTable
+ __device__ __constant__ int EDGE_CORNERS[12][2] = {
+-    {0,1},{1,2},{2,3},{3,0},   // 0–3  bottom square, X Y X Y
+-    {4,5},{5,6},{6,7},{7,4},   // 4–7  top    square
+-    {0,4},{1,5},{2,6},{3,7}    // 8–11 vertical edges (Z)
++    {0,1},{1,2},{2,3},{3,0},   // 0-3  bottom square, X Y X Y
++    {4,5},{5,6},{6,7},{7,4},   // 4-7  top    square
++    {0,4},{1,5},{2,6},{3,7}    // 8-11 vertical edges (Z)
+ };
+ 
+ 
+@@ -454,7 +454,7 @@
+         float denom = vb - va;
+         float t;
+         if (fabsf(denom) < 1e-30f)
+-            t = 0.5f;                       // degenerate edge → midpoint
++            t = 0.5f;                       // degenerate edge to midpoint
+         else {
+             t = (iso - va) / denom;         // interpolate
+             t = fminf(fmaxf(t, 0.f), 1.f);  // clamp numerical noise
+@@ -479,7 +479,7 @@
+         outKeys [base + outOfs] = key;
+         ++outOfs;
+     }
+-    // now outOfs == __popc(mask)  ✔
++    // now outOfs == __popc(mask)  ok
+ }
+ 
+ // CUDA kernel: generate triangles (with *old* vertex indices, will remap later)

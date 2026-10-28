@@ -1,0 +1,37 @@
+# Inference outputs and downloaded weights
+/outputs/
+/output/
+/results/
+/ckpts/
+/checkpoints/
+/pretrained/
+/weights/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+
+# Runtime and build caches
+/.cache/
+/tmp/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.so
+*.pyd
+
+# Local environments and editor settings
+/.venv/
+/venv/
+/.env
+/.env.*
+!/.env.example
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
+*.Zone.Identifier
+*:Zone.Identifier

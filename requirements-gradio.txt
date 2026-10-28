@@ -1,0 +1,3 @@
+# Optional web interface; install after the inference environment.
+gradio==6.15.0
+huggingface-hub>=0.33.5,<1.0
